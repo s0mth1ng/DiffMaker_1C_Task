@@ -19,6 +19,27 @@ namespace DiffMaker {
         return out;
     }
 
+    std::istream &operator>>(std::istream &in, BlockDifference &diff) {
+        char *idInHex = new char[sizeof(size_t)];
+        in.read(idInHex, sizeof(size_t));
+        diff.blockId = FromHex(idInHex);
+        delete[] idInHex;
+
+        char *typeInHex = new char[1];
+        in.read(typeInHex, 1);
+        diff.type = static_cast<BlockDifference::DifferenceType>(typeInHex[0]);
+        if (diff.type != BlockDifference::DifferenceType::Deleted) {
+            auto currentPos = in.tellg();
+            in.seekg(0, std::istream::end);
+            size_t size = std::min(static_cast<size_t>(in.tellg() - currentPos), BLOCK_SIZE);
+            in.seekg(currentPos);
+            diff.updatedData = new char[size];
+            in.read(diff.updatedData, size);
+            diff.size = size;
+        }
+        return in;
+    }
+
     char *ToHex(size_t index) {
         size_t size = sizeof(size_t);
         char *data = new char[size];
@@ -51,17 +72,19 @@ namespace DiffMaker {
         std::ofstream diffFile(diffFileName, std::ostream::binary);
 
         size_t blockStart = 0;
-        while (blockStart + BLOCK_SIZE <= oldFileSize && blockStart + BLOCK_SIZE <= newFileSize) {
-            char *oldBlockData = new char[BLOCK_SIZE];
-            oldFile.read(oldBlockData, BLOCK_SIZE);
-            char *newBlockData = new char[BLOCK_SIZE];
-            newFile.read(newBlockData, BLOCK_SIZE);
-            if (strcmp(oldBlockData, newBlockData) != 0) {
+        while (blockStart < oldFileSize && blockStart < newFileSize) {
+            size_t oldDataLeft = std::min(BLOCK_SIZE, oldFileSize - blockStart);
+            size_t newDataLeft = std::min(BLOCK_SIZE, newFileSize - blockStart);
+            char *oldBlockData = new char[oldDataLeft];
+            oldFile.read(oldBlockData, oldDataLeft);
+            char *newBlockData = new char[newDataLeft];
+            newFile.read(newBlockData, newDataLeft);
+            if (oldDataLeft != newDataLeft || strncmp(oldBlockData, newBlockData, oldDataLeft) != 0) {
                 BlockDifference diff;
                 diff.blockId = blockStart / BLOCK_SIZE;
                 diff.type = BlockDifference::DifferenceType::Changed;
                 diff.updatedData = newBlockData;
-                diff.size = BLOCK_SIZE;
+                diff.size = newDataLeft;
                 diffFile << diff;
             }
             delete[] oldBlockData;
@@ -69,24 +92,77 @@ namespace DiffMaker {
             blockStart += BLOCK_SIZE;
         }
 
-        while (blockStart < newFileSize) {
-            BlockDifference diff;
-            diff.blockId = blockStart / BLOCK_SIZE;
-            diff.type = BlockDifference::DifferenceType::Added;
-            size_t size = std::min(newFileSize - blockStart, blockStart);
-            diff.updatedData = new char[size];
-            newFile.read(diff.updatedData, size);
-            diff.size = size;
-            diffFile << diff;
-            blockStart += BLOCK_SIZE;
+        if (newFileSize > oldFileSize) {
+            while (blockStart < newFileSize) {
+                BlockDifference diff;
+                diff.blockId = blockStart / BLOCK_SIZE;
+                diff.type = BlockDifference::DifferenceType::Added;
+                size_t size = std::min(newFileSize - blockStart, blockStart);
+                diff.updatedData = new char[size];
+                newFile.read(diff.updatedData, size);
+                diff.size = size;
+                diffFile << diff;
+                blockStart += BLOCK_SIZE;
+            }
+        } else {
+            while (blockStart < oldFileSize) {
+                BlockDifference diff;
+                diff.blockId = blockStart / BLOCK_SIZE;
+                diff.type = BlockDifference::DifferenceType::Deleted;
+                diffFile << diff;
+                blockStart += BLOCK_SIZE;
+            }
         }
+    }
 
-        while (blockStart < oldFileSize) {
-            BlockDifference diff;
-            diff.blockId = blockStart / BLOCK_SIZE;
-            diff.type = BlockDifference::DifferenceType::Deleted;
-            diffFile << diff;
+    void Recover(const std::string &oldFileName, const std::string &diffFileName, std::string newFileName) {
+        if (newFileName.empty()) {
+            newFileName = oldFileName + "_recovered";
+        }
+        std::ifstream oldFile(oldFileName, std::istream::binary);
+        size_t oldFileSize = GetFileSize(oldFile);
+
+        std::ifstream diffFile(diffFileName, std::ostream::binary);
+        size_t diffFileSize = GetFileSize(oldFile);
+
+        std::ofstream newFile(newFileName, std::istream::binary);
+
+        BlockDifference diff;
+        size_t blockStart = 0;
+        while (diffFile >> diff) {
+            std::cerr << (diff.type == BlockDifference::DifferenceType::Deleted) << ' ' << diff.blockId << ' '
+                      << diff.size << std::endl;
+            while (blockStart / BLOCK_SIZE != diff.blockId) {
+                size_t size = std::min(oldFileSize - blockStart, BLOCK_SIZE);
+                char *data = new char[size];
+                oldFile.read(data, size);
+                newFile.write(data, size);
+                delete[] data;
+                blockStart += BLOCK_SIZE;
+            }
+            if (diff.type != BlockDifference::DifferenceType::Deleted) {
+                newFile.write(diff.updatedData, diff.size);
+                delete[] diff.updatedData;
+            }
             blockStart += BLOCK_SIZE;
         }
+        while (blockStart < oldFileSize) {
+            size_t size = std::min(oldFileSize - blockStart, BLOCK_SIZE);
+            char *data = new char[size];
+            oldFile.read(data, size);
+            newFile.write(data, size);
+            delete[] data;
+            blockStart += BLOCK_SIZE;
+        }
+    }
+
+    size_t FromHex(const char *hex) {
+        size_t result = 0;
+        size_t size = sizeof(size_t);
+        for (size_t i = 0; i < size; ++i) {
+            result <<= 4;
+            result += hex[i];
+        }
+        return result;
     }
 }  // namespace DiffMaker
